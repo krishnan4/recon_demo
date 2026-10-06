@@ -292,6 +292,34 @@
             font-size: 11.5px;
         }
 
+        /* auto-generate indicator in the top bar */
+        .auto-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 4px 11px;
+            border-radius: 99px;
+            background: rgba(255, 255, 255, .16);
+            color: #fff;
+            font-size: 12.5px;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .auto-chip:hover {
+            background: rgba(255, 255, 255, .26);
+            text-decoration: none;
+        }
+
+        .auto-chip::before {
+            content: "";
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #5ee59a;
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+
         .content {
             flex: 1;
             padding: 18px 16px calc(var(--footer-h) + 22px);
@@ -529,6 +557,44 @@
             color: var(--muted);
             font-size: 13px;
             margin-left: auto;
+        }
+
+        /* auto generate panel */
+        .auto-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px 22px;
+            flex-wrap: wrap;
+        }
+
+        .auto-bar>label:not(.check) {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--ink-2);
+            font-weight: 500;
+        }
+
+        .auto-bar select.control {
+            width: auto;
+            height: 34px;
+        }
+
+        .auto-bar .check {
+            font-weight: 600;
+        }
+
+        .auto-info {
+            margin-top: 12px;
+            color: var(--ink-2);
+            font-size: 13px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .auto-note {
+            margin: 6px 0 0;
+            font-size: 12.5px;
+            color: var(--muted);
         }
 
         /* buttons */
@@ -1237,6 +1303,8 @@
             const MIN_MS = 2000, MAX_MS = 6000;           // time to generate one report
             const SLOTS = 2;                               // reports generated at the same time
             const MAX_PER_REQUEST = 100;
+            const AUTO_MINUTES = [1, 2, 5, 10, 15, 30];    // choices for "auto generate every N minutes"
+            const MAX_KEEP = 5000;                         // oldest reports are removed beyond this, so storage never fills up
             const NETWORKS = ["CARD", "UPI", "IMPS", "NEFT/RTGS", "ATM", "POS", "AEPS"];
             const DATE_TYPES = ["File Date", "Transaction Date", "Settlement Date"];
             const REPORT_TYPES = ["Pregen Report", "Custom Report"];
@@ -1267,6 +1335,7 @@
             const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
             const fmtInt = (n) => (n == null ? "—" : Number(n).toLocaleString("en-IN"));
             const pad = (n, w = 2) => String(n).padStart(w, "0");
+            const mmss = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${pad(s % 60)}`; };
             // dates are "day numbers" (days since 1970-01-01, UTC) so time zones never shift them
             const DAY = 86400000;
             const dn = (iso) => { const [y, m, d] = iso.split("-").map(Number); return Date.UTC(y, m - 1, d) / DAY; };
@@ -1305,6 +1374,7 @@
             function load() {
                 try { db = JSON.parse(storage.get(KEY)); } catch { db = null; }
                 if (!db || !Array.isArray(db.reports)) { db = { nextId: 350560, slots: [0, 0], reports: [] }; seed(); save(); }
+                autoCfg();
             }
             const save = () => storage.set(KEY, JSON.stringify(db));
 
@@ -1385,6 +1455,57 @@
                 rep.start = Math.max(now + 300, db.slots[i]);
                 rep.end = rep.start + MIN_MS + Math.random() * (MAX_MS - MIN_MS);
                 db.slots[i] = rep.end;
+            }
+
+            // ── auto generate (runs every N minutes while the portal is open and logged in) ──
+            const AUTO_DEFAULT = {
+                on: false, minutes: 2, period: "yesterday", networkType: "CARD", reportType: "Pregen Report",
+                reportName: "ALL", dateType: "File Date", last: 0, next: 0, runs: 0
+            };
+            const AUTO_PERIODS = { yesterday: "Yesterday", today: "Today", mtd: "Month to date" };
+            let onAutoRun = null;                    // the open page can listen for new auto reports
+            function autoCfg() {
+                db.auto ||= {};
+                for (const [k, v] of Object.entries(AUTO_DEFAULT)) if (db.auto[k] === undefined) db.auto[k] = v;
+                return db.auto;
+            }
+            function autoRange(period) {
+                const t = todayDn();
+                if (period === "today") return [t, t];
+                if (period === "mtd") { const p = parts(t); return [Date.UTC(p.y, p.m, 1) / DAY, t]; }
+                return [t - 1, t - 1];
+            }
+            function autoTick() {
+                const user = session.get();
+                if (!user || !autoCfg().on || Date.now() < db.auto.next) return;
+                // pick up the latest data first, so two open tabs never both generate the same batch
+                try { const fresh = JSON.parse(storage.get(KEY)); if (fresh && Array.isArray(fresh.reports)) db = fresh; } catch { /* keep */ }
+                const a = autoCfg(), now = Date.now();
+                if (!a.on || now < a.next) return;
+                a.last = now;
+                a.next = now + a.minutes * 60000;
+                const [f, t] = autoRange(a.period);
+                try {
+                    const made = createReports({
+                        networkType: a.networkType, reportType: a.reportType, reportName: a.reportName, dateType: a.dateType,
+                        fromDate: isoOf(f), toDate: isoOf(t)
+                    }, `auto:${user.username}`);
+                    a.runs += 1;
+                    if (db.reports.length > MAX_KEEP) db.reports.splice(0, db.reports.length - MAX_KEEP);
+                    save();
+                    toast(`Auto generate: ${made.length} report${made.length === 1 ? "" : "s"} queued (next in ${a.minutes} min)`, "ok");
+                    if (onAutoRun) onAutoRun(made);
+                } catch (ex) {
+                    save();
+                    toast(`Auto generate: ${ex.message}`, "err");
+                }
+            }
+            function autoChip() {
+                const el = $("#autoChip");
+                if (!el) return;
+                const a = autoCfg();
+                el.hidden = !a.on;
+                if (a.on) el.textContent = `Auto · every ${a.minutes} min · next ${mmss(a.next - Date.now())}`;
             }
 
             function listReports({ page = 1, size = 20, code = "", q = "", status = "" }) {
@@ -1630,7 +1751,7 @@
                     return v;
                 };
                 const lines = [headers.map(q).join(","), ...rows.map((row) => row.map((v, c) => q(fmt(v, kinds[c]))).join(","))];
-                return new TextEncoder().encode("﻿" + lines.join("\r\n") + "\r\n");
+                return new TextEncoder().encode("\uFEFF" + lines.join("\r\n") + "\r\n");
             }
 
             const fileBase = (rep) => {
@@ -1724,6 +1845,7 @@
         <header class="topbar">
           <button class="burger" type="button" aria-label="Toggle menu" aria-controls="sidebar">${icon("menu")}</button>
           <span class="title">Recon<b>Test</b></span><span class="spacer"></span>
+          <a class="auto-chip" id="autoChip" href="#/reports" title="Auto generate is on — open Report Download to change it" hidden></a>
           <span class="user-chip"><span class="who">${esc(user.name)}<small>${esc(user.role)}</small></span><span class="avatar" title="${esc(user.username)}">${esc(user.name.split(" ").map((p) => p[0]).join("").slice(0, 2))}</span></span>
         </header>
         <main class="content" id="view"></main>
@@ -1735,6 +1857,7 @@
                     else document.body.classList.toggle("collapsed");
                 });
                 $(".scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
+                autoChip();
             }
             function renderSidebar(here) {
                 const groups = MENU.map(([label, ic, items]) => {
@@ -1846,6 +1969,19 @@
           </div>
         </form>
       </section>
+      <section class="card" aria-labelledby="autoTitle">
+        <div class="card-head"><h2 id="autoTitle">Auto Generate</h2><span class="badge b-queued" id="autoState">Off</span></div>
+        <div class="card-body">
+          <div class="auto-bar">
+            <label class="check" for="autoOn"><input type="checkbox" id="autoOn"> Generate reports automatically</label>
+            <label for="autoEvery">Every <select class="control" id="autoEvery">${AUTO_MINUTES.map((m) => `<option value="${m}">${m} min</option>`).join("")}</select></label>
+            <label for="autoPeriod">Period <select class="control" id="autoPeriod">${Object.entries(AUTO_PERIODS).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select></label>
+          </div>
+          <div class="auto-info" id="autoInfo"></div>
+          <p class="auto-note">Uses the Network Type, Report Type, Report Name and Date Type chosen above. The first batch is made as soon as you turn it on.
+            It keeps running on every page while this portal is open and logged in, in any tab of this browser.</p>
+        </div>
+      </section>
       <section class="card" aria-labelledby="listTitle">
         <div class="card-head">
           <h2 class="caps" id="listTitle">REPORTS</h2>
@@ -1871,6 +2007,15 @@
       </section>`;
 
                 const form = $("#reportForm");
+
+                // when auto generate is on, show its settings in the form
+                const a0 = autoCfg();
+                if (a0.on) {
+                    $("#networkType").value = a0.networkType; $("#reportName").value = a0.reportName; $("#dateType").value = a0.dateType;
+                    const rt = $$("input[name=reportType]", form).find((x) => x.value === a0.reportType);
+                    if (rt) rt.checked = true;
+                }
+
                 const hint = () => {
                     const f = $("#fromDate").value, t = $("#toDate").value;
                     const days = f && t && t >= f ? dn(t) - dn(f) + 1 : 0;
@@ -1880,7 +2025,54 @@
                 ["reportName", "fromDate", "toDate", "splitByDay"].forEach((id) => $("#" + id).addEventListener("change", hint));
                 hint();
                 const err = (id, msg) => { $("#" + id).setAttribute("aria-invalid", msg ? "true" : "false"); const e = $(`#${id}-err`); if (e) { e.textContent = msg || ""; e.classList.toggle("show", !!msg); } };
-                form.addEventListener("reset", () => setTimeout(() => { ["networkType", "fromDate", "toDate"].forEach((i) => err(i, "")); hint(); }));
+
+                // ── auto generate panel ──
+                const formCfg = () => ({ networkType: $("#networkType").value, reportType: form.reportType.value, reportName: $("#reportName").value, dateType: $("#dateType").value });
+                const syncAuto = () => {
+                    const a = autoCfg(), c = formCfg();
+                    if (!a.on || !c.networkType) return;
+                    Object.assign(a, c); save(); drawAuto();
+                };
+                const setIf = (el, prop, v) => { if (el[prop] !== v) el[prop] = v; };
+                function drawAuto() {
+                    const a = autoCfg();
+                    setIf($("#autoOn"), "checked", a.on);
+                    setIf($("#autoEvery"), "value", String(a.minutes));
+                    setIf($("#autoPeriod"), "value", a.period);
+                    const st = $("#autoState");
+                    st.className = "badge " + (a.on ? "b-completed" : "b-queued");
+                    st.textContent = a.on ? "Running" : "Off";
+                    const what = a.reportName === "ALL" ? `All (${GENERATE_ALL.length} reports)` : (REPORTS[a.reportName] || ["?"])[0];
+                    $("#autoInfo").textContent = a.on
+                        ? `${a.networkType} · ${what} · ${AUTO_PERIODS[a.period] || a.period} · next run in ${mmss(a.next - Date.now())}` +
+                        (a.runs ? ` · ${a.runs} run${a.runs === 1 ? "" : "s"} so far${a.last ? `, last at ${fmtFull(a.last).split(", ")[1]}` : ""}` : "")
+                        : `Off. Turn it on to generate reports every ${a.minutes} min.`;
+                }
+                $("#autoOn").addEventListener("change", (e) => {
+                    const a = autoCfg();
+                    if (e.target.checked) {
+                        const c = formCfg();
+                        if (!c.networkType) {
+                            e.target.checked = false; err("networkType", "Select a network type");
+                            return toast("Select a Network Type before turning on auto generate", "err");
+                        }
+                        Object.assign(a, c, { on: true, next: Date.now(), runs: 0, last: 0 });
+                        toast(`Auto generate on — every ${a.minutes} min`, "ok");
+                    } else {
+                        a.on = false;
+                        toast("Auto generate off");
+                    }
+                    save(); autoTick(); drawAuto(); autoChip();
+                });
+                $("#autoEvery").addEventListener("change", (e) => {
+                    const a = autoCfg();
+                    a.minutes = Number(e.target.value);
+                    if (a.on) a.next = (a.last || Date.now()) + a.minutes * 60000;
+                    save(); drawAuto(); autoChip();
+                });
+                $("#autoPeriod").addEventListener("change", (e) => { autoCfg().period = e.target.value; save(); drawAuto(); });
+                form.addEventListener("change", syncAuto);
+                form.addEventListener("reset", () => setTimeout(() => { ["networkType", "fromDate", "toDate"].forEach((i) => err(i, "")); hint(); syncAuto(); }));
 
                 const state = { page: 1, size: 20, code: "", q: "", selected: new Set(), highlight: new Set() };
                 form.addEventListener("submit", (e) => {
@@ -1975,8 +2167,11 @@
                 let qt;
                 $("#search").addEventListener("input", (e) => { clearTimeout(qt); qt = setTimeout(() => draw({ page: 1, q: e.target.value.trim() }), 250); });
                 $("#refreshBtn").addEventListener("click", () => draw({ force: true }));
+                // highlight reports made by auto generate
+                onAutoRun = (made) => { made.forEach((r) => state.highlight.add(r.id)); draw({ force: true }); };
                 draw();
-                every(1000, () => draw());
+                drawAuto();
+                every(1000, () => { draw(); drawAuto(); });
             }
 
             function statusPage() {
@@ -2086,6 +2281,7 @@
             // ── router ────────────────────────────────────────────────────────────────
             function route() {
                 stopPage(); stopPage = () => { };
+                onAutoRun = null;
                 const raw = location.hash || "#/dashboard";
                 if (raw.startsWith("#download-")) return;
                 const [path, query] = raw.split("?");
@@ -2106,9 +2302,16 @@
 
             load();
             window.addEventListener("hashchange", route);
-            window.addEventListener("storage", (e) => { if (e.key === KEY) { try { db = JSON.parse(e.newValue) || db; } catch { /* keep */ } } });
+            window.addEventListener("storage", (e) => { if (e.key === KEY) { try { db = JSON.parse(e.newValue) || db; autoCfg(); } catch { /* keep */ } } });
+            // auto generate clock: checks every second, on every page
+            setInterval(() => { autoTick(); autoChip(); }, 1000);
             // tools for testing from the browser console
-            window.ReconTest = { reset() { storage.del(KEY); location.reload(); }, data: () => db };
+            window.ReconTest = {
+                reset() { storage.del(KEY); location.reload(); }, data: () => db,
+                autoStart(opts = {}) { Object.assign(autoCfg(), opts, { on: true, next: Date.now(), runs: 0, last: 0 }); save(); return { ...db.auto }; },
+                autoStop() { autoCfg().on = false; save(); return { ...db.auto }; },
+                autoStatus: () => ({ ...autoCfg() }),
+            };
             route();
         })();
     </script>
