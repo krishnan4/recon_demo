@@ -1,9 +1,0 @@
-{
-  "name": "recontest",
-  "private": true,
-  "type": "module",
-  "description": "ReconTest test portal on Netlify - shared reports with Netlify Functions and Netlify Blobs",
-  "dependencies": {
-    "@netlify/blobs": "^11.1.3"
-  }
-}
