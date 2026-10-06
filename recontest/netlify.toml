@@ -1,0 +1,8 @@
+[build]
+  # no build step: the page is a plain HTML file
+  command = "echo 'no build'"
+  publish = "public"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
