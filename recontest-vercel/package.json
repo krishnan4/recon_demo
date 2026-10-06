@@ -1,0 +1,9 @@
+{
+  "name": "recontest",
+  "private": true,
+  "type": "module",
+  "description": "ReconTest test portal on Vercel - shared reports in Upstash Redis",
+  "dependencies": {
+    "@upstash/redis": "^1.39.0"
+  }
+}
